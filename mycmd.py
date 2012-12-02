@@ -1,5 +1,3 @@
-#Justin's test
-#Tim's test
 # Your AI for CTF must inherit from the base Commander class.  See how this is
 # implemented by looking at the commander.py in the ./api/ folder.
 from api import Commander

@@ -1,0 +1,23 @@
+How to use git with github:
+
+In order to clone, run:
+
+# git clone https://github.com/wildertm/jytwai
+
+In order to add files, run:
+
+# git add .
+
+In order to commit:
+
+# git commit -a
+
+In order to push your changes to the web repo:
+
+# git push origin
+
+In order to pull your changes from the web repo:
+
+# git pull web master
+
+it automatically rebases your local repository
