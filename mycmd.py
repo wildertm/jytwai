@@ -136,7 +136,8 @@ class learningCommander(Commander):
         
     def getFeatureVector(self, state, commandType, mode):
         bot = state
-        vector = self.modes[mode][features][commandType]
+        featureVector = self.modes[mode][features][commandType]
+        return featureVector
         
     
     def updateWeights(self, state, action, nextState, reward):
