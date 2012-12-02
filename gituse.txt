@@ -16,8 +16,20 @@ In order to push your changes to the web repo:
 
 # git push origin
 
-In order to pull your changes from the web repo:
+Workflow:
 
-# git pull web master
+With github, you can only submit one pull request from a branch, so whenever you make a change - make it in a branch before you submit 
+the pull request.
 
-it automatically rebases your local repository
+git branch temp
+git checkout temp
+#make changes, git commit -a, etc.
+git push origin temp
+#go to the website, make a pull request
+#When you want to delete the branch locally...
+git tag V1.0 # in order to save it in history
+git checkout master
+git reset --hard temp
+git branch -D temp
+#In order to delete it from the remote repo
+git push origin --delete temp
