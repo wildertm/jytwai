@@ -24,18 +24,18 @@ class learningCommander(Commander):
         self.randomRate = 0.0
         self.bots = {}
         for bot in self.game.team.members:
-            self.bots[bot] = {'currentAction': None}
+            self.bots[bot] = {'currentAction': None, 'storedRegressionVector' : None, 'forecastedValue' : None}
         # Classifier: Structured as {commands.Attack : (regression0, coefficient0), (regression1, coefficient1}... commands.Defend : (regression0.....)}
         self.actionClassifier = self.classifierGenerator()
         # Store all needed features.
-        self.features = self.featureGenerator()
+        self.features = self.initialFeatureGenerator()
         
     # Regressions
     def attackRegression(self, bot, action): 
         distanceVector = self.features['enemyFlag'] - action[2]
         return 100/distanceVector.length()
     def currentActionRegression(self, bot, action): 
-        return 10        
+        return 5        
     def defendRegression(self, bot, action): 
         return 0        
     def chargeRegression(self, bot, action): 
@@ -43,65 +43,77 @@ class learningCommander(Commander):
     def moveRegression(self, bot, action): 
         return 0
     
-    def featureGenerator(self):
+    def initialFeatureGenerator(self):
         features = {}
         features['enemyFlag'] = self.game.enemyTeam.flag.position
         return features
+
+    def featureUpdate(self):
+        """Updates the features dictionary each tick."""
+        pass
                  
     def classifierGenerator(self):
         classifier = {
-        commands.Attack : [(self.attackRegression, 1)],
-        'currentAction' : [(self.currentActionRegression, 2)],
-        commands.Charge : [(self.chargeRegression, 1)],
-        commands.Move : [(self.moveRegression, 2)],
-        commands.Defend : [(self.defendRegression, 1)]
+        commands.Attack : [[self.attackRegression, 1]],
+        'currentAction' : [[self.currentActionRegression, 2]],
+        commands.Charge : [[self.chargeRegression, 1]],
+        commands.Move : [[self.moveRegression, 2]],
+        commands.Defend : [[self.defendRegression, 1]]
         }
         return classifier
         
     def tick(self):
         """Override this function for your own bots.  Here you can access all the information in self.game,
         which includes game information, and self.level which includes information about the level."""
+        self.featureUpdate()
         self.counter += 1
-        if self.counter%20 == 0:
+        if self.counter%50 == 0:
+            print '@@@@@@@@@@@@@@@@@@@@@@@@@ NEW TICK @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'
             for bot in self.game.team.members:
-                action = self.getAction(bot)
-                self.issueAndStore(action)
-
-    def getAction(self, state):
+                (action, value, regressionVector) = self.getAction(bot)
+                self.issueAndStore(action, value, regressionVector)
+                print 'BOT:  ', bot, 'Dictionary:  ', self.bots[bot], '\n'
+ 
+    def getAction(self, bot):
         """
-          Implements picking an action at a given state, this is where exploration is coded in. 
+          Implements picking an action for a bot, allows for epsilon greedy exploration to be coded in.
+          Returns value for issueAndStore to store for use in update function.
         """
-        # Pick action either by exploring at a predetermined random rate, or choosing amongst the best available options.
-        legalActions = self.getCandidateActions(state)
+        #Pick action either by exploring a random available option at a predetermined rate, or choosing amongst the best available options.
+        legalActions = self.getCandidateActions(bot)
         if len(legalActions) == 0:
-          action = None
+            (action, value, regressionVector) = (None, None, None)
         elif random.random() < self.randomRate == True:
-          action = random.choice(legalActions)
+            (action, value, regressionVector) = (random.choice(legalActions), None, None)
         else:
-          action = self.getPolicy(state)
-        return action
+            (action, value, regressionVector)  = self.getPolicy(bot)
+        return (action, value, regressionVector)
 
-    def getPolicy(self, state):
+    def getPolicy(self, bot):
         """
-          Compute the best action to take in a state.
+          Compute the best action to take for a given bot by getting all values, choosing highest.
+          Return action, valuation of action, regression vector used to get valuation.
         """
-        candidateActions = self.getCandidateActions(state)
+        candidateActions = self.getCandidateActions(bot)
         if len(candidateActions) == 0:
-          return None
+            print 'WARNING: EMPTY CANDIDATE ACTION LIST. FIX THAT FUNCTION!'
+            return (None, None, None)
         bestAction = None
-        best = -100000000
+        bestValue = -100000000
         bestSet = []
+        bestRegressionVector = None
         for action in candidateActions:
-          value = self.getHueristicValue(state,action)
-          if value > best:
-            best = value
-            bestAction = action
-            bestSet = []
-          if value == best:
-            bestSet.append(action)          
+            (value, regressionVector) = self.getHueristicValue(bot, action)
+            if value > bestValue:
+                bestValue = value
+                bestAction = action
+                bestSet = []
+                bestRegressionVector = regressionVector
+            if value == bestValue:
+                bestSet.append(action)          
         if len(bestSet) != 0:
-          return random.choice(bestSet)
-        return bestAction
+            return (random.choice(bestSet), bestValue, bestRegressionVector)
+        return (bestAction, bestValue, bestRegressionVector)
 
     def getCandidateActions(self, state):
         """Use random distribution across map to find potential points, add current action, defend facing a random set of directions.
@@ -128,15 +140,15 @@ class learningCommander(Commander):
         command = action[0]
         value = 0
         regressionVector = self.actionClassifier[command]
-        for functionAndWeightTuple in regressionVector:
-            value += functionAndWeightTuple[0](bot, action) * functionAndWeightTuple[1]
-        return value
+        for functionAndWeightPair in regressionVector:
+            value += functionAndWeightPair[0](bot, action) * functionAndWeightPair[1]
+        return (value, regressionVector)
         
     def getRegressionVector(self, command):
         vector = self.actionClassifier[command]
         return vector
         
-    def issueAndStore(self, action):
+    def issueAndStore(self, action, value, regressionVector):
         """Takes a list that constitutes a stored action, decides what kind of action it is,
         issues that command, tells commander bot is doing that command. We do this rather than directly
         issue so that currentAction can be a candidateAction."""
@@ -147,16 +159,17 @@ class learningCommander(Commander):
             return
         bot = action[1]
         if command == commands.Attack:
-            print action
-            self.issue(command, bot,action[2], description=action[3])
+            self.issue(command, bot, action[2], description = action[3])
         elif command == commands.Defend:
             self.issue(command, bot, facingDirection = action[2], description=action[3])
         elif command == commands.Charge:
             self.issue(command, bot, description = action[2])
         elif command == commands.Move:
             self.issue(command, bot, description = action[2])            
-        #Stores the action as the bots currently executing action. 
-        self.bots[action[1]] = action        
+        #Stores the action as the bots currently executing action. Also store the regressions dict that picked it and the value of that state. 
+        self.bots[bot]['currentAction'] = action
+        self.bots[bot]['forecastedValue'] = value
+        self.bots[bot]['storedRegressionVector'] = regressionVector
 
     def shutdown(self):
         """Use this function to teardown your bot after the game is over, or perform an
