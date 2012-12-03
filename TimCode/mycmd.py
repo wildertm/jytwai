@@ -19,7 +19,7 @@ class learningCommander(Commander):
     # Regressions
     def attackRegression(self, bot, action): 
         distanceVector = self.features['enemyFlag'] - action[2]
-        return 100/distanceVector.length()
+        return 100/(distanceVector.length()+3)
     def currentActionRegression(self, bot, action): 
         return 5        
     def defendRegression(self, bot, action): 
@@ -27,8 +27,14 @@ class learningCommander(Commander):
     def chargeRegression(self, bot, action): 
         return 0        
     def moveRegression(self, bot, action): 
-        return 0
-    
+        return 0   
+    def botsInSightCone(self, bot, action):
+        enemybotsseen = 0
+        for bot in self.game.bots_alive:
+               VisibleLiveEnemies = [enemybot for enemybot in bot.visibleEnemies if enemybot.health != 0]
+               enemybotsseen += len(VisibleLiveEnemies)
+        return enemybotsseen
+        
     def initialFeatureGenerator(self):
         features = {}
         features['enemyFlag'] = self.game.enemyTeam.flag.position
@@ -40,11 +46,11 @@ class learningCommander(Commander):
                  
     def classifierGenerator(self):
         classifier = {
-        commands.Attack : [[self.attackRegression, 1]],
-        'currentAction' : [[self.currentActionRegression, 2]],
-        commands.Charge : [[self.chargeRegression, 1]],
-        commands.Move : [[self.moveRegression, 2]],
-        commands.Defend : [[self.defendRegression, 1]]
+        commands.Attack : [[self.attackRegression, 1], [self.botsInSightCone, 1]],
+        'currentAction' : [[self.currentActionRegression, 1], [self.botsInSightCone, 1]],
+        commands.Charge : [[self.chargeRegression, 1], [self.botsInSightCone, 1]],
+        commands.Move : [[self.moveRegression, 1], [self.botsInSightCone, 1]],
+        commands.Defend : [[self.defendRegression, 1], [self.botsInSightCone, 1]]
         }
         return classifier
 
@@ -58,7 +64,8 @@ class learningCommander(Commander):
         self.discount = 1.0
         for bot in self.game.team.members:
             self.bots[bot] = {'currentAction': None, 'storedRegressionVector' : None,
-                             'storedRegressionValueVector': None, 'forecastedValue' : None, 'timeOfAction': 0.0
+                             'storedRegressionValueVector': None, 'forecastedValue' : None, 'timeOfAction': 0.0,
+                              'dead': False
                               }
         # Classifier: Structured as {commands.Attack : (regression0, coefficient0), (regression1, coefficient1}... commands.Defend : (regression0.....)}
         self.actionClassifier = self.classifierGenerator()
@@ -73,7 +80,7 @@ class learningCommander(Commander):
             #Decide if that bot's action is done or it has died and update the weight vector accordingly/issue a new action.
             resolved = self.testForActionResolved(bot)
             if resolved in ('died', 'finished'):
-                print 'RESOLVED ACTION OR DIED'
+                print bot, 'actionEnded: ', resolved
                 reward = self.getReward(bot)
                 if resolved == 'finished':
                     (action, value, regressionVector, regressionValueVector) = self.getAction(bot)
@@ -110,10 +117,11 @@ class learningCommander(Commander):
             oldWeight + self.learningRate*storedValueVector[index]*(reward + presentBestActionValue - forecastedValue)
             proposedChange = proposedNewWeight - oldWeight
             changeFromOtherActionsBetweenCommandAndUpdate = actualCurrentWeight - oldWeight
-            if changeFromOtherActionsBetweenCommandAndUpdate/proposedChange > .5:
-                continue
-            else:
-                regressions[index][1] = proposedNewWeight       
+            if proposedChange != 0.0:
+                if changeFromOtherActionsBetweenCommandAndUpdate/proposedChange > .2:
+                    continue
+                else:
+                    regressions[index][1] = proposedNewWeight       
         print self.actionClassifier[command]
         
     def getReward(self, bot):
@@ -130,34 +138,39 @@ class learningCommander(Commander):
                 #Did the bot die or kill something since it last committed to an action?
                 if event.type == killed:
                     if event.subject == bot:
-                        reward -= 10
-                    else:
+                        reward -= 50
+                    elif event.instigator == bot:
                         reward += 10
                 elif event.type == flagPickedUp:
-                    if event.subject == bot:
+                    if event.instigator == bot:
                         reward += 10
                 elif event.type == flagCaptured:
-                    if event.subject == bot:
+                    if event.instigator == bot:
                         reward += 100              
         return reward
                 
     def resetCurrentBotInfo(self, bot):
-        self.bots[bot]['currentAction'] = None
-        self.bots[bot]['forecastedValue'] = None
-        self.bots[bot]['timeOfAction'] = None
+            self.bots[bot] = {'currentAction': None, 'storedRegressionVector' : None,
+                             'storedRegressionValueVector': None, 'forecastedValue' : None, 'timeOfAction': 0.0,
+                              'dead': False
+                              }
 
     def testForActionResolved(self, bot):
         """Check if a given bot has either finished its action or died. Return True if yes, False if otherwise.
         This is used to tell when we update our weights, and when we give new orders out of cycle.
         """
         killed = 1
-        for event in self.game.match.combatEvents:
-            #Did the bot die since it last committed to an action?
-            if event.type == killed and self.bots[bot]['timeOfAction'] < event.time and event.subject == bot:
-                return 'died'
-        if bot in self.game.bots_available:
-            return 'finished'
-        else:
+        if self.bots[bot]['dead'] == False or bot.health > 0:
+            for event in self.game.match.combatEvents:
+                #Did the bot die since it last committed to an action?
+                if event.type == killed and self.bots[bot]['timeOfAction'] < event.time and event.subject == bot:
+                    self.bots[bot]['dead'] = True
+                    return 'died'
+            if bot in self.game.bots_available:
+                return 'finished'
+            else:
+                return False
+        elif self.bots[bot]['dead'] == True:
             return False
  
     def getAction(self, bot):
@@ -207,7 +220,7 @@ class learningCommander(Commander):
         Alongside projected action by doing nothing."""
         bot = state
         actions = []
-        for x in range(15):
+        for x in range(10):
             position = self.level.findRandomFreePositionInBox(self.level.area)         
             #Add random attack positions.
             actions.append([commands.Attack, bot, position,"Attacking selected point."])
@@ -229,9 +242,11 @@ class learningCommander(Commander):
         regressionVector = self.actionClassifier[command]
         regressionValueVector = []
         for functionAndWeightPair in regressionVector:
-            singleFunctionValue = functionAndWeightPair[0](bot, action) * functionAndWeightPair[1]
+            featureValue = functionAndWeightPair[0](bot, action)
+            weight = functionAndWeightPair[1]
+            singleFunctionValue = featureValue * weight
             value += singleFunctionValue
-            regressionValueVector.append(singleFunctionValue)
+            regressionValueVector.append(featureValue)
         return (value, regressionVector, regressionValueVector)
         
     def getRegressionVector(self, command):
