@@ -9,7 +9,9 @@ from api import commands
 # The maps for CTF are layed out along the X and Z axis in space, but can be
 # effectively be considered 2D.
 from api import Vector2
-import random
+
+import pickle, os, inspect, random, datetime
+
 
 class learningCommander(Commander):
     """
@@ -19,38 +21,40 @@ class learningCommander(Commander):
     # Regressions
     def attackRegression(self, bot, action): 
         distanceVector = self.features['enemyFlag'] - action[2]
-        return 100/(distanceVector.length()+3)
+        return 10/(distanceVector.length()+3)
     def currentActionRegression(self, bot, action): 
-        return 5        
+        return 1
     def defendRegression(self, bot, action): 
-        return 0        
+        return 1       
     def chargeRegression(self, bot, action): 
-        return 0        
+        return 1      
     def moveRegression(self, bot, action): 
-        return 0   
+        return 1
     def botsInSightCone(self, bot, action):
         enemybotsseen = 0
         for bot in self.game.bots_alive:
                VisibleLiveEnemies = [enemybot for enemybot in bot.visibleEnemies if enemybot.health != 0]
                enemybotsseen += len(VisibleLiveEnemies)
         return enemybotsseen
+    def enemyFlag(self, bot, action):
+        if action != 'currentAction':
+            vector = action[2] - self.game.enemyTeam.flag.position
+            return -1*vector.length()
+        else:
+            return 1
         
     def initialFeatureGenerator(self):
         features = {}
         features['enemyFlag'] = self.game.enemyTeam.flag.position
         return features
-
-    def featureUpdate(self):
-        """Updates the features dictionary each tick."""
-        pass
                  
     def classifierGenerator(self):
         classifier = {
-        commands.Attack : [[self.attackRegression, 1], [self.botsInSightCone, 1]],
+        commands.Attack : [[self.attackRegression, 1], [self.botsInSightCone, 1], [self.enemyFlag, 1]],
         'currentAction' : [[self.currentActionRegression, 1], [self.botsInSightCone, 1]],
-        commands.Charge : [[self.chargeRegression, 1], [self.botsInSightCone, 1]],
-        commands.Move : [[self.moveRegression, 1], [self.botsInSightCone, 1]],
-        commands.Defend : [[self.defendRegression, 1], [self.botsInSightCone, 1]]
+        commands.Charge : [[self.chargeRegression, 1], [self.botsInSightCone, 1], [self.enemyFlag, 1]],
+        commands.Move : [[self.moveRegression, 1], [self.botsInSightCone, 1], [self.enemyFlag, 1]],
+        commands.Defend : [[self.defendRegression, 1], [self.botsInSightCone, 1], [self.enemyFlag, 1]]
         }
         return classifier
 
@@ -61,7 +65,7 @@ class learningCommander(Commander):
         self.randomRate = 0.0
         self.bots = {}
         self.learningRate = .1
-        self.discount = 1.0
+        self.discount = .4
         for bot in self.game.team.members:
             self.bots[bot] = {'currentAction': None, 'storedRegressionVector' : None,
                              'storedRegressionValueVector': None, 'forecastedValue' : None, 'timeOfAction': 0.0,
@@ -71,6 +75,9 @@ class learningCommander(Commander):
         self.actionClassifier = self.classifierGenerator()
         # Store all needed features.
         self.features = self.initialFeatureGenerator()
+
+    def featureUpdate(self):
+        pass
         
     def tick(self):
         """Routine to deal with new information every interval of about .1s"""
@@ -80,7 +87,6 @@ class learningCommander(Commander):
             #Decide if that bot's action is done or it has died and update the weight vector accordingly/issue a new action.
             resolved = self.testForActionResolved(bot)
             if resolved in ('died', 'finished'):
-                print bot, 'actionEnded: ', resolved
                 reward = self.getReward(bot)
                 if resolved == 'finished':
                     (action, value, regressionVector, regressionValueVector) = self.getAction(bot)
@@ -106,23 +112,23 @@ class learningCommander(Commander):
         regressions = self.actionClassifier[command]
         storedValueVector = self.bots[bot]['storedRegressionValueVector']
         forecastedValue = self.discount*self.bots[bot]['forecastedValue']
-        presentBestActionValue = self.getPolicy(bot)[1]
+        presentBestActionValue = self.getPolicy(bot)[1]        
         for index in range(len(regressions)):
-            #We update each weight in the regression function vector.
-            #This requires checking to see if the update we want to make has already been made by another bot.
+            #Updating weights requires checking to see if the update we want to make has already been made by another bot.
             #We don't want to get the same update twice.
             oldWeight = oldRegressions[index][1]
             actualCurrentWeight = regressions[index][1]
+            featureValue = storedValueVector[index]
             proposedNewWeight = \
-            oldWeight + self.learningRate*storedValueVector[index]*(reward + presentBestActionValue - forecastedValue)
+            oldWeight + self.learningRate*featureValue*(reward + self.discount*presentBestActionValue - forecastedValue)
             proposedChange = proposedNewWeight - oldWeight
             changeFromOtherActionsBetweenCommandAndUpdate = actualCurrentWeight - oldWeight
             if proposedChange != 0.0:
-                if changeFromOtherActionsBetweenCommandAndUpdate/proposedChange > .2:
+                if changeFromOtherActionsBetweenCommandAndUpdate/proposedChange > 0.0:
                     continue
                 else:
                     regressions[index][1] = proposedNewWeight       
-        print self.actionClassifier[command]
+                    print self.actionClassifier[command]
         
     def getReward(self, bot):
         """Calculates how a finished action turned out for our bot. TODO learn reward values as opposed to hard? """
@@ -138,15 +144,15 @@ class learningCommander(Commander):
                 #Did the bot die or kill something since it last committed to an action?
                 if event.type == killed:
                     if event.subject == bot:
-                        reward -= 50
+                        reward -= .5
                     elif event.instigator == bot:
-                        reward += 10
+                        reward += .6
                 elif event.type == flagPickedUp:
                     if event.instigator == bot:
-                        reward += 10
+                        reward += 2
                 elif event.type == flagCaptured:
                     if event.instigator == bot:
-                        reward += 100              
+                        reward += 4              
         return reward
                 
     def resetCurrentBotInfo(self, bot):
@@ -156,7 +162,7 @@ class learningCommander(Commander):
                               }
 
     def testForActionResolved(self, bot):
-        """Check if a given bot has either finished its action or died. Return True if yes, False if otherwise.
+        """Check if a given bot has either finished its action or died recently. Return True if yes, False if otherwise.
         This is used to tell when we update our weights, and when we give new orders out of cycle.
         """
         killed = 1
@@ -243,10 +249,10 @@ class learningCommander(Commander):
         regressionValueVector = []
         for functionAndWeightPair in regressionVector:
             featureValue = functionAndWeightPair[0](bot, action)
+            regressionValueVector.append(featureValue)
             weight = functionAndWeightPair[1]
             singleFunctionValue = featureValue * weight
             value += singleFunctionValue
-            regressionValueVector.append(featureValue)
         return (value, regressionVector, regressionValueVector)
         
     def getRegressionVector(self, command):
@@ -283,5 +289,22 @@ class learningCommander(Commander):
     def shutdown(self):
         """Use this function to teardown your bot after the game is over, or perform an
         analysis of the data accumulated during the game."""
-
+        storeRegressionVector(self.actionClassifier, str(datetime.datetime.now()))
         pass
+
+
+#These two functions store and extract Python pickled dictionaries.
+#Code from http://docs.python.org/2/library/pickle.html
+def storeRegressionVector(dictionary, fileName):
+    storageDestination = os.path.join(os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))), 'logs', fileName)
+    data = dictionary
+    selfref_list = [1, 2, 3]
+    selfref_list.append(selfref_list)
+    outputFile = open(storageDestination, 'wb')
+    # Pickle dictionary using protocol 0.
+    pickle.dump(data, outputFile)
+
+def loadRegressionVector(fileName):
+    dictFile = os.path.join(os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))), 'logs', fileName)
+    f = open(dictFile, 'r')
+    return pickle.load(f)
