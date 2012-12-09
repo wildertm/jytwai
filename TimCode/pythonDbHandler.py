@@ -1,16 +1,21 @@
 import os, inspect, pickle, MySQLdb
 
-#These two functions store and extract Python pickled dictionaries.
-#Code from http://docs.python.org/2/library/pickle.html
+def getLargestBotID():
+    conn = connect()
+    cursor =  conn.cursor()
+    cursor.execute("SELECT max(bot_id) from bots")
+    result = cursor.fetchone()
+    return int(result[0])  
+
+#These two functions store and extract Python pickled dictionaries in the DB.
 def storeClassifier(dictionary, botID = None):
     conn = connect()
     cursor = conn.cursor()
     pickledDatabaseInput = pickle.dumps(dictionary, protocol=1)
     if botID != None:
-        cursor.execute('insert into snapshots(classifier, bot_id) values(%s, %s)', (pickledDatabaseInput, botID))       
+        cursor.execute('update bots SET in_use=FALSE, classifier=%s WHERE bot_id=%s', (pickledDatabaseInput, botID,))       
     else:
-        print 'ARRRGHHH'
-        sql = "insert into bots(classifier) values(%s)"
+        sql = "INSERT INTO bots(classifier, in_use) VALUES(%s, FALSE)"
         cursor.execute(sql, (pickledDatabaseInput,))
     conn.commit()
     cursor.close()
@@ -19,10 +24,8 @@ def storeClassifier(dictionary, botID = None):
 def loadClassifier(botID):
     conn = connect()
     cursor = conn.cursor()
-    query = 'select * from bots where bot_id = %d'% (botID)
-    cursor.execute(query)
+    cursor.execute('select * from bots where bot_id = %d'% (botID,))
     blob = cursor.fetchone()
-    conn.commit()
     cursor.close()
     conn.close()
     return pickle.loads(blob[2])
@@ -33,7 +36,3 @@ def connect():
                            passwd = "test1234",
                            db = "ai")
     return conn
-
-dictionary =  {1:'a', 2:'b', 3:'c'}
-storeClassifier(dictionary)
-print loadClassifier(54)
