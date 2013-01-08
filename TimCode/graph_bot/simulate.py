@@ -19,11 +19,11 @@ from game.application import CaptureTheFlag
 
 # By default load these commanders.
 ##defaults = ['ambush.AmbushCommander', 'examples.BalancedCommander']
-defaults = ['autocmd.learningCommander', 'examples.BalancedCommander']
+defaults = ['mycmd.hodorCommander', 'examples.BalancedCommander']
 
 # Possible levels that can be used.
 ##levels = ['map00', 'map01', 'map10', 'map11', 'map20', 'map21', 'map30']
-levels = ['map30']
+levels = ['map11']
 
 def main(PreferedRunner, args, accel, **kwargs):
     """

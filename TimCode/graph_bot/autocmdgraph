@@ -1,0 +1,180 @@
+# Your AI for CTF must inherit from the base Commander class.  See how this is
+# implemented by looking at the commander.py in the ./api/ folder.
+from api import Commander
+
+# The commander can send 'Commands' to individual bots.  These are listed and
+# documented in commands.py from the ./api/ folder also.
+from api import commands
+
+# The maps for CTF are layed out along the X and Z axis in space, but can be
+# effectively be considered 2D.
+from api import Vector2
+
+import pickle, os, inspect, random, datetime
+import pythonDbHandler, regressions, regressions2
+
+
+class learningCommander(Commander):
+    MODE_VISIBILITY = 0 
+    MODE_TRAVELLING = 1
+    
+    def classifierGenerator(self):
+        classifier = {
+        commands.Attack : [[regressions2.enemy_shoots_square, -10],
+                           [regressions.enemyFlag, 3],
+                           [regressions.timeToScore, 100],
+                           [regressions.lookTowardEnemyBots, -3],
+                           [regressions.spread, -1],
+                           [regressions.lookTowardEnemyBase, -1]
+                           ],
+        commands.Charge : [[regressions.botsInSightCone, 1],
+                           [regressions.canEnemyBotSeePath, -1],
+                           [regressions.timeToScore, 200]
+                           ],
+        commands.Move : [[regressions.enemyFlag, 1],
+                         [regressions.botsInSightCone, 1],
+                         [regressions.canEnemyBotSeePath, -1],
+                         [regressions.timeToScore, 5]
+                         ],
+        commands.Defend : [[regressions.enemyFlag, 1],
+                          [regressions.botsInSightCone, 1]
+                          ]
+                    }
+        return classifier
+
+    def initialize(self):
+        """Use this function to setup your bot before the game starts."""
+        #Makes 88x50 graph with adjacent squares having edges.
+        self.graph = regressions2.makeGraph(self)
+        #Initialized a graphical representation of work.
+        regressions2.initialize_graphics(self)
+        
+        self.verbose = True
+        self.counter = 0
+        self.bots = {}
+        # Classifier: Structured as {commands.Attack : (regression0, coefficient0), (regression1, coefficient1}... commands.Defend : (regression0.....)}
+        self.classifier = self.classifierGenerator()
+        print 'DONE initializing'
+        
+    def tick(self):
+        """Routine to deal with new information every interval of about .1s"""
+        self.counter += 1
+        for bot in self.game.team.members:
+            can_shoot_enemy = False
+            any_enemy_sighted = False
+            #Check to see if no enemies are visible, or if the bot can currently shoot one.
+            #In either case, this bot doesn't want a new order.
+            for enemy_bot in self.game.enemyTeam.members:
+                if enemy_bot.seenlast < 2.0 and enemy_bot.health > 0.0:
+                    if regressions2.can_bot_shoot(self, bot, enemy_bot.position):
+                        can_shoot_enemy = True
+                    else:
+                        any_enemy_sighted = True
+            #TODO fix logic          
+            if self.counter % 20 == 0 and can_shoot_enemy == False and bot.health > 0 and any_enemy_sighted == True or bot in self.game.bots_available:
+                legalActions = self.getCandidateActions(bot)
+                action = self.getAction(bot, legalActions)    
+                self.issueCMD(action)                
+        #Refreshes visuals
+        if self.counter%2 == 0:
+            regressions2.update_graphics(self)
+            self.visualizer.tick()
+ 
+    def getAction(self, bot, legalActions):
+        """Adds layer of flexibility used to get better look angles."""
+        action = self.getPolicy(bot, legalActions)
+        legalActions = self.getLookDirectionArray(15, action)
+        action = self.getPolicy(bot, legalActions)
+        return action
+        
+    def getPolicy(self, bot, candidateActions):
+        """
+          Compute the best action to take for a given bot by getting all values, choosing highest.
+          Return action, valuation of action, regression vector used to get valuation.
+        """
+        bestAction = None
+        bestValue = float("-inf")
+        bestSet = []
+        for action in candidateActions:
+            value = self.getHueristicValue(bot, action)
+            if value == bestValue:
+                bestSet.append(action) 
+            elif value > bestValue:
+                bestValue = value
+                bestAction = action
+                bestSet = []       
+        if len(bestSet) != 0:
+            return random.choice(bestSet)
+        return bestAction
+
+    def getCandidateActions(self, state):#TODO, random map filter, generate new points about best N actions, pick best from secondary filter.
+        """Use random distribution across map to find potential points, add current action, defend facing a random set of directions.
+        Alongside projected action by doing nothing."""
+        bot = state
+        actions = []
+        #Enemy Flag
+        position = self.game.enemyFlags[0].position
+        lookAtDirection = self.level.findRandomFreePositionInBox(self.level.area)
+        actions.append([commands.Attack, bot, [position], lookAtDirection, "Attacking selected point."])
+        #Score location
+        position= self.game.team.flagScoreLocation
+        lookAtDirection = self.level.findRandomFreePositionInBox(self.level.area)
+        actions.append([commands.Attack, bot, [position], lookAtDirection, "Attacking selected point."])
+        
+        for x in range(200):
+            lookAtDirection = self.level.findRandomFreePositionInBox(self.level.area) 
+            position = self.level.findRandomFreePositionInBox(self.level.area)         
+            #Add random attack positions.
+            actions.append([commands.Attack, bot, [position], lookAtDirection, "Attacking selected point."])
+##            defendDirection = Vector2(random.random()*random.sample([-1,1],1)[0], random.random()*random.sample([-1,1],1)[0])
+##            #Add defend commands with random directions.
+##            actions.append([commands.Defend, bot, defendDirection, "Defending facing random direction."])
+            #Add random move commands.
+##            actions.append([commands.Move, bot, position, "Moving to selected point."])
+            #Add random charge commands.
+##            actions.append([commands.Charge, bot, position, "Charging to selected point."])            
+        #Add current action string as an option. Parsed to special action that continues to execute current command.
+##        actions.append(['currentAction'])
+        return actions
+
+    def getLookDirectionArray(self, numActions, action):
+        """Returns an arbitrary length list of actions based on the passed action with random look directions."""
+        newActionList = []
+        if action[0] == commands.Attack:
+            for x in range(numActions):
+                lookAtDirection = self.level.findRandomFreePositionInBox(self.level.area)
+                action[3] = lookAtDirection
+                newActionList.append(action)
+        elif action[0] == commands.Defend:
+            for x in range(numActions):
+                defendDirection = Vector2(random.random()*random.sample([-1,1],1)[0], random.random()*random.sample([-1,1],1)[0])
+                action[3] = lookAtDirection
+                newActionList.append(action)
+        return newActionList
+
+    def getHueristicValue(self, bot, action):
+        #Takes bot, action, uses self.classifier dict to return a valuation of the bot's action.
+        command = action[0]
+        value = 0
+        regressionVector = self.classifier[command]
+        for functionAndWeightPair in regressionVector:
+            featureValue = functionAndWeightPair[0](self, bot, action)
+            weight = functionAndWeightPair[1]
+            singleFunctionValue = featureValue * weight
+            value += singleFunctionValue
+        return value
+        
+    def issueCMD(self, action):     
+        command = action[0]
+        bot = action[1]
+        if command == commands.Attack:
+            self.issue(command, bot, action[2], action[3], description = action[4])
+        elif command == commands.Defend:
+            self.issue(command, bot, facingDirection = action[2], description=action[3])
+        elif command == commands.Charge:
+            self.issue(command, bot, action[2], description = action[3])
+        elif command == commands.Move:
+            self.issue(command, bot, action[2], description = action[3])
+
+    def shutdown(self):
+        pass
