@@ -1,0 +1,470 @@
+# Your AI for CTF must inherit from the base Commander class.  See how this is
+# implemented by looking at the commander.py in the ./api/ folder.
+from api import Commander
+
+# The commander can send 'Commands' to individual bots.  These are listed and
+# documented in commands.py from the ./api/ folder also.
+from api import commands
+
+# The maps for CTF are layed out along the X and Z axis in space, but can be
+# effectively be considered 2D.
+from api import Vector2
+
+import pickle
+import os
+import inspect
+import random
+import datetime
+
+#My modules
+import regressions, regressions2, enemy_belief
+
+UNIT_TEST = False
+TRAINING = True
+LOAD = 22
+if TRAINING or LOAD:
+    import pythonDbHandler
+
+class macbethCommander(Commander):
+    MODE_VISIBILITY = 0 
+    MODE_TRAVELLING = 1
+    
+    def classifierGenerator(self):
+        if LOAD:
+            classifier = python
+            
+        elif TRAINING:
+            print "LOADING BOT"
+            classifier = self.get_classifier_from_env()
+        else:
+            print "USING STOCK BOT"
+            classifier = {
+                commands.Attack : [
+            [regressions2.popular_ground, 1],
+            [regressions2.go_to_flank_brink, 2],
+            [regressions2.spread_targets2, 15],
+            [regressions2.go_toward_flag, 12],
+            [regressions2.distance, 2],
+            [regressions2.enemy_distance, 20],
+            [regressions2.time_to_score, 1000]
+            ],
+                    commands.Charge : [
+            [regressions2.popular_ground, 1],
+            [regressions2.go_to_flank_brink, 2],
+            [regressions2.spread_targets2, 15],
+            [regressions2.go_toward_flag, 12],
+            [regressions2.distance, 2],
+            [regressions2.enemy_distance, 10],
+            [regressions2.time_to_score, 1000]
+            ],
+            commands.Move : [[regressions.enemyFlag, 1],
+                             [regressions.botsInSightCone, 1],
+                             [regressions.canEnemyBotSeePath, -1],
+                             [regressions.timeToScore, 5]
+                             ],
+            commands.Defend : [[regressions.enemyFlag, 1],
+                              [regressions.botsInSightCone, 1]
+                              ]
+                        }
+        return classifier
+
+    def initialize(self):
+        """Use this function to setup your bot before the game starts."""
+        self.verbose = True
+        self.counter = 0
+        self.enemies = {}
+        self.botID = None
+        
+        #Used to store bots current command.
+        self.bots = {}
+        for bot in self.game.team.members:
+            self.bots[bot.name] = {}
+            self.bots[bot.name]["command"] = None
+            self.bots[bot.name]["last_command_time"] = -5.0
+            
+        # Classifier: Structured as {commands.Attack : (regression0, coefficient0), (regression1, coefficient1}... commands.Defend : (regression0.....)}
+        self.classifier = self.classifierGenerator()
+
+        #GRAPHICS LOGIC     
+        #Toggles graphics to desired display. Must be off to submit!!!
+##        self.GRAPHICS = "p_enemy"
+##        self.GRAPHICS = "p_enemy_sight"
+##        self.GRAPHICS = "p_enemy_fire"
+##        self.GRAPHICS = "ambush"
+        self.GRAPHICS = False
+        #Toggles drawing helper points.
+##        self.DRAW_POINTS = "extrap"
+##        self.DRAW_POINTS = "flanking"
+        self.DRAW_POINTS = False
+        
+        #Refactoring functional instance variables here for easy tweaking.
+        #At what distance do we cut off speculation on an enemy's location?
+        self.MAX_ENEMY_DISTANCE = 25
+        #Variable used in enemy_belief to determine how many points to do sight calcs on. 
+        self.TOTAL_FS_NODES = 13
+        #Determines minimum probability of an enemy being in a node for it to be evaluated.
+        self.MINIMUM_ENEMY_PROB = 0.01
+        
+        #Initialized a graphical representation of work and the graph.
+        #Makes 88x50 graph with adjacent squares having edges.
+        #CALLS regressions2.make_graph to do this.
+        regressions2.make_graph(self)
+        regressions2.calculate_control_main_route2(self)
+        regressions2.update_graph(self)
+        
+        if self.GRAPHICS or self.DRAW_POINTS:
+            regressions2.initialize_graphics(self)   
+            #Calculate initial probability distribution for location of enemies.
+            #Show initial gui graphics.
+            regressions2.update_graphics_probability(self, mode = self.GRAPHICS)
+            self.visualizer.tick()
+
+        print 'DONE initializing'
+            
+    def tick(self):
+        """Routine to deal with new information every interval of about .1s"""
+        self.HOLD_RATE = 2
+        self.COMMAND_RATE = 35
+        self.AVAIL_RATE = 5
+        
+        self.counter += 1
+        if self.counter == 1:
+
+            #We do this twice even though we plan to override it. We want a point to spread our targets from.
+            self.command_routine(self.game.bots_available)
+            self.graphics_tick()
+
+        self.avoid_suicide_and_trades()
+
+        if self.counter%self.AVAIL_RATE == 0:
+            if self.counter%self.COMMAND_RATE != 0 and self.counter%self.HOLD_RATE != 0:
+                for bot in self.game.bots_available:
+                    #Updates graph knowledge about game state.
+                    #Update graphics to show probability distribution of enemies' as we assess it.
+                    #Optionally we can pass any of the probabilities weighted on the graph : p_enemy, p_enemy_fire, p_enemy_sight.     
+                    self.command_routine([bot])
+                    self.graphics_tick()
+
+        if self.counter%self.HOLD_RATE == 0:
+            if len(self.game.bots_holding) > 0 and self.counter%self.COMMAND_RATE != 0 and self.counter%self.AVAIL_RATE !=0:
+                #Updates graph knowledge about game state.
+                #Update graphics to show probability distribution of enemies' as we assess it.
+                #Optionally we can pass any of the probabilities weighted on the graph : p_enemy, p_enemy_fire, p_enemy_sight.     
+                self.command_routine(self.game.bots_holding)
+                self.graphics_tick()
+        
+        if self.counter % self.COMMAND_RATE == 0:
+            #Updates graph knowledge about game state.
+            regressions2.update_graph(self)
+            #Update graphics to show probability distribution of enemies' as we assess it.
+            #Optionally we can pass any of the probabilities weighted on the graph : p_enemy, p_enemy_fire, p_enemy_sight.     
+            self.command_routine(self.game.team.members)
+            self.graphics_tick()
+
+    def avoid_suicide_and_trades(self):
+        #New orders for all charging bots about to suicide.
+        if self.counter%self.COMMAND_RATE != 0 and self.counter%self.AVAIL_RATE !=0 and self.counter%self.HOLD_RATE != 0:
+            bots = []
+            for bot in self.game.team.members:
+                if bot.health > 0 and self.bots[bot.name]["command"] != None:
+                    if type(self.bots[bot.name]["command"]) == commands.Charge or type(self.bots[bot.name]["command"]) == commands.Attack:
+                        continue_command = regressions2.get_continue_command(self, bot, self.bots[bot.name]["command"])
+                        if len(continue_command.target) == 1:
+                            if self.graph.node[regressions2.get_node_index(self, continue_command.target[0])]["p_enemy_fire"] > .25:
+                                bots.append(bot)
+                        else:
+                            for position in continue_command.target[0:int(len(continue_command.target)/4)]:
+                                if self.graph.node[regressions2.get_node_index(self, position)]["p_enemy_fire"] > .25:
+                                    bots.append(bot)
+            self.command_routine(bots)
+            
+
+    def graphics_tick(self):
+        if self.GRAPHICS:
+            regressions2.update_graphics_probability(self, mode = self.GRAPHICS) 
+            self.visualizer.tick()
+        elif self.DRAW_POINTS:
+            self.visualizer.tick()
+            self.visibilities.fill(0)
+        
+            
+    def command_routine(self, bots):
+        for bot in bots:           
+            #If it makes sense to move, evaluate actions and take the best. Otherwise don't waste processing power calculating an action.
+            no_command = self.check_to_see_if_no_command(bot)
+            if no_command == False and bot.health > 0 or bot in self.game.bots_available:
+                legalActions = self.get_p_actions(bot)
+                command, value = self.get_action(bot, legalActions)
+                command = self.get_view_command(command)
+                
+                #Consider whether the strength of continuing the current command and hence having no command wait is superior.
+                #If it isn't, issue the command, otherwise, continue the present command.
+
+                #Resets bots' stored commands to None who are dead or have finished a task.
+                self.refresh_bot_commands()
+##                if self.bots[bot.name]["command"] != None:
+##                    continue_value = regressions2.evaluate_continue_present_command(self, bot, command)
+##                    if continue_value > value: #TODO calibrate skipping
+##                        continue
+                self.bots[bot.name]["last_command_time"] = self.game.match.timePassed
+                self.issue_cmd(command)
+                
+    def refresh_bot_commands(self):
+        for bot in self.game.team.members:
+            if bot.health < 0:
+                self.bots[bot.name]["command"] = None
+        for bot in self.game.bots_available:
+            self.bots[bot.name]["command"] = None
+            
+    def check_to_see_if_no_command(self, bot):
+        """Pass when any enemy is in our sights, or we don't see any enemies."""
+        can_shoot_enemy = False
+        enemy_sighted = False
+        recent_command = False
+        #Check to see if no enemies are visible, or if the bot can currently shoot one.
+        #In either case, this bot doesn't want a new order.
+        for enemy_bot in self.game.enemyTeam.members:
+            if enemy_bot.seenlast < 2.0 and enemy_bot.health > 0.0 and enemy_bot in bot.visibleEnemies:
+                if regressions2.can_bot_shoot(self, bot, enemy_bot.position):
+                    can_shoot_enemy = True
+        if can_shoot_enemy:
+            return True
+        else:
+            return False
+ 
+    def get_action(self, bot, legalActions):
+        """Adds layer of flexibility used to get better look angles."""
+        command, value = self.get_policy(bot, legalActions)
+        return command, value
+        
+    def get_policy(self, bot, candidate_actions):
+        """
+          Compute the best command to take for a given bot by getting all values, choosing highest.
+          Return command, valuation of command, regression vector used to get valuation.
+        """
+        bestAction = None
+        bestValue = float("-inf")
+        bestSet = []
+        for command in candidate_actions:
+            value = self.get_hueristic_value(bot, command)
+            if value == bestValue:
+                bestSet.append(command) 
+            elif value > bestValue:
+                bestValue = value
+                bestAction = command
+                bestSet = []       
+        if len(bestSet) != 0:
+            return random.choice(bestSet), bestValue
+        return bestAction, bestValue
+
+    def get_flanking_positions(self, bot, actions = 10):
+        position_list = []
+        for x in range(actions * 10):
+            position = self.level.findRandomFreePositionInBox(self.level.area)
+            score = self.score_flanking_position(position, bot)
+            position_list.append((score, position))
+        position_list.sort()
+        position_list = position_list[len(position_list) - actions:-1]
+        return_list = [position for score, position in position_list]
+        return return_list
+
+    def score_flanking_position(self, position, bot):
+        #Score possible positions
+        node_index = regressions2.get_node_index(self, position)        
+        they_can_shoot = 300 * self.graph.node[node_index]["p_enemy_fire"]
+        
+##        far_from_friendlies = 0
+##        for friendly in self.game.team.members:
+##            far_from_friendlies += (position - friendly.position).length()
+        
+        far_from_friendlies = 0
+        for friendly in self.game.team.members:
+            command = self.bots[friendly.name]["command"]
+            if command != None:
+                far_from_friendlies += position.distance(command.target[-1])
+        far_from_friendlies /= len(self.game.team.members)
+            
+        rough_enemy_dist = 0.0
+        living = 0.0
+        for enemy_bot in self.game.enemyTeam.members:
+            if enemy_bot.health > 0.0:
+                living += 1
+                rough_enemy_dist += position.distance(enemy_bot.position)
+        rough_enemy_dist /= living+1
+
+        goto_flank_brink = 0.0
+        minimum_distance = min([position.distance(enemy_bot.position) for enemy_bot in self.game.enemyTeam.members])
+        dist_from_flank_range = abs((self.level.firingDistance + 4) - minimum_distance)
+        if dist_from_flank_range > 0:
+            goto_flank_brink = 50/(dist_from_flank_range**+1)
+
+        distance = (bot.position - position).length()
+        
+        a, b, c, d, e = far_from_friendlies*4, goto_flank_brink*50, they_can_shoot*-1, rough_enemy_dist*-1, distance*-15
+        
+##        print "far_from_friendlies: ", a
+##        print "goto_flank_brink: ", b 
+##        print "they_can_shoot: ", c
+##        print "rough_enemy_dist: ", d
+##        print "distance: ", e
+##        print 
+        score = a + b + c + d + e
+        return score        
+
+    def get_p_actions(self, bot): #TODO, random map filter, generate new points about best N commands, pick best from secondary filter.
+        command_list = []
+        
+        potential_flanking_positions = self.get_flanking_positions(bot, actions = 6)
+        potential_charge_flank = potential_flanking_positions[len(potential_flanking_positions)/2:-1]
+        if self.DRAW_POINTS == "flanking":
+            regressions2.draw_points(self, potential_flanking_positions)
+
+        #If our bot has the flag... don't run toward the enemy, go score!
+        if bot.flag:
+            #Score location
+            destination = self.game.team.flagScoreLocation
+            regressions2.update_score_graph(self)
+            waypoints = regressions2.get_path(self, bot.position, destination)
+            waypoints = self.prune_waypoints(waypoints)
+            command_list.append(commands.Move(bot.name, waypoints, description = "Moving toward the flag score."))
+            regressions2.update_graph(self)
+            return command_list       
+
+        living_enemies = 0
+        for enemy in self.game.enemyTeam.members:
+            if enemy.health > 0:
+                living_enemies += 1
+        if len(self.game.bots_alive)/(living_enemies+1) > 1.3 or (bot.position - self.game.enemyTeam.flag.position).length() < 20:
+            #Enemy Flag - ATTACK AND CHARGE
+            destination = self.game.enemyTeam.flag.position
+            direction = self.level.findRandomFreePositionInBox(self.level.area)
+            waypoints = regressions2.get_path(self, bot.position, destination)
+            waypoints = self.prune_waypoints(waypoints)
+            command_list.append(commands.Attack(bot.name, waypoints, description = "Attacking toward enemy flag."))
+        if len(self.game.bots_alive)/(living_enemies+1) > 1.5 or (bot.position - self.game.enemyTeam.flag.position).length() < 20:
+            command_list.append(commands.Charge(bot.name, waypoints, description = "Charging toward the enemy flag."))
+
+        #Update graph before calculating all new paths.
+        for position in potential_flanking_positions:
+            #Add random attack destinations
+            destination = position
+            waypoints = regressions2.get_path(self, bot.position, destination)
+            #Shorten waypoint list to speed up calculations.
+            waypoints = self.prune_waypoints(waypoints)
+            command_list.append(commands.Attack(bot.name, waypoints, description = "Flanking toward the enemy at %s." % waypoints[-1]))
+            
+        for position in potential_charge_flank:
+            destination = position
+            waypoints = regressions2.get_path(self, bot.position, destination)
+            waypoints = self.prune_waypoints(waypoints)
+            command_list.append(commands.Charge(bot.name, waypoints, description = "Charging toward the enemy at %s." % waypoints[-1]))
+
+        if UNIT_TEST:
+            #Waypoint length 1 bug.
+            any_over_1 = False
+            for command in command_list:
+                if len(command.target) > 1:
+                    any_over_1 = True
+            assert(any_over_1 == True)
+            
+        return command_list
+
+    def get_view_command(self, command):
+        bot_position = self.game.team.members[int(command.botId[-1])].position
+        
+        if type(command) == commands.Attack:
+            nodes = self.graph.nodes()
+            total_mass = 0.0
+            
+            first_position = regressions2.get_node_vector(self, nodes[0])
+            first_mass = self.graph.node[nodes[0]]["p_enemy"] * 1/(bot_position.distance(first_position)**2+1)
+
+            center = first_position * first_mass
+            total_mass += first_mass
+
+            for node_index in nodes[1:]:
+                prob = self.graph.node[node_index]["p_enemy"]
+                node_position = regressions2.get_node_vector(self, node_index)
+                distance = bot_position.distance(node_position)
+                mass = 1/((distance)**2+1) * prob
+                #Prevent very close, low probability enemies from biasing.
+##                if prob < .2 and distance < 8:
+##                    continue
+                center += node_position * mass
+                total_mass += mass
+
+            if total_mass != 0.0:
+                final_vector = center/total_mass
+            else:
+                final_vector = command.target[-1]
+            command.lookAt = final_vector
+            #TODO weight direction of travel into vector?
+        return command
+               
+
+    def prune_waypoints(self, waypoints):
+        length = len(waypoints)
+        if length > 8:
+            waypoints = waypoints[::6]
+        return waypoints
+
+    def get_look_direction_array(self, numActions, command):
+        """Returns an arbitrary length list of commands based on the passed command with random look directions."""
+        newActionList = []
+        newActionList.append(command)
+        if type(command) == commands.Attack:
+            for x in range(numActions):
+                direction = self.level.findRandomFreePositionInBox(self.level.area)
+                command.lookAt = direction
+                newActionList.append(command)
+        elif type(command) == commands.Defend:
+            for x in range(numActions):
+                direction = Vector2(random.random()*random.sample([-1,1],1)[0], random.random()*random.sample([-1,1],1)[0])
+                command.facingDirection = direction
+                newActionList.append(command)
+        return newActionList
+
+    def get_hueristic_value(self, bot, command):
+        #Takes bot, command, uses self.classifier dict to return a valuation of the bot's command.
+        value = 0
+        regressionVector = self.classifier[type(command)]
+        for functionAndWeightPair in regressionVector:
+            featureValue = functionAndWeightPair[0](self, bot, command)
+            weight = functionAndWeightPair[1]
+            singleFunctionValue = featureValue * weight
+            value += singleFunctionValue
+##            print "function: ", functionAndWeightPair[0], ' value: ', singleFunctionValue #@PRINT
+##        print
+        return value
+
+    def issue_cmd(self, command):
+        bot = self.game.team.members[int(command.botId[-1])]
+        #Store command
+        self.bots[bot.name]["command"] = command
+        
+        if type(command) == commands.Attack:
+            self.issue(type(command), bot, command.target, lookAt = command.lookAt, description = command.description)
+        elif type(command) == commands.Defend:
+            self.issue(type(command), bot, facingDirection = command.facingDirection, description = command.description)
+        elif type(command) == commands.Charge:
+            self.issue(type(command), bot, command.target, description = command.description)
+        elif type(command) == commands.Move:
+            self.issue(type(command), bot, command.target, description = command.description)
+
+    def get_classifier_from_env(self):
+        if self.game.team.name == 'Red':
+            botID = int(os.environ['red_team_bot_id'])
+            classifier = pythonDbHandler.loadClassifier(botID)
+        elif self.game.team.name == 'Blue':
+            botID = int(os.environ['blue_team_bot_id'])
+            classifier = pythonDbHandler.loadClassifier(botID)
+        if classifier != None:
+            self.botID = botID	
+            return classifier 
+
+    def shutdown(self):
+        print 'SHUTTING DOWN AND STORING'
+        if self.botID:
+            pythonDbHandler.storeClassifier(self.classifier, self.botID)
+
+    
